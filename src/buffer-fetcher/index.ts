@@ -2,6 +2,7 @@ import fetch, { Response } from 'node-fetch';
 import { CacheManagerBase } from '../cache-manager';
 import { splitArrayInChunks, wait } from '../utils/general';
 import { BufferFetcherInput, BufferObject } from './types';
+import https from 'https';
 
 export class BufferFetcher {
   batchSize: number;
@@ -74,17 +75,8 @@ export class BufferFetcher {
       let shouldSkipBatchWait = false;
 
       if (this.cacheManager) {
-        let wholeBatchExistsInCache = true;
-
-        for (let j = 0, m = batchData.length; j < m; j++) {
-          if (!batchData[j].isCacheHit) {
-            wholeBatchExistsInCache = false;
-            break;
-          }
-        }
-
+        let wholeBatchExistsInCache = batchData.every(item => item.isCacheHit);
         shouldSkipBatchWait = wholeBatchExistsInCache;
-
         await this.cacheManager.writeItemsToCache(batchData);
       }
 
@@ -92,9 +84,7 @@ export class BufferFetcher {
         await this.onBatchFetch(batchData, isLastBatch);
       }
 
-      const shouldWait =
-        n > 1 && !isLastBatch && !shouldSkipBatchWait && this.pauseBetweenBatchesMs;
-
+      const shouldWait = n > 1 && !isLastBatch && !shouldSkipBatchWait && this.pauseBetweenBatchesMs;
       if (shouldWait) {
         await wait(this.pauseBetweenBatchesMs);
       }
@@ -105,31 +95,21 @@ export class BufferFetcher {
 
   public async fetch(urls: string[]): Promise<BufferObject[]> {
     const fetchedObjects: BufferObject[][] = [];
-
     const batches = splitArrayInChunks(urls, this.batchSize);
 
     for (let i = 0, n = batches.length; i < n; i++) {
       const isLastBatch = i === n - 1;
       const data = await this.fetchBatch(batches[i]);
       fetchedObjects.push(data);
+
       let shouldSkipBatchWait = false;
 
       if (this.cacheManager) {
-        let wholeBatchExistsInCache = true;
-
-        for (let j = 0, m = data.length; j < m; j++) {
-          if (!data[j].isCacheHit) {
-            wholeBatchExistsInCache = false;
-            break;
-          }
-        }
-
+        let wholeBatchExistsInCache = data.every(item => item.isCacheHit);
         shouldSkipBatchWait = wholeBatchExistsInCache;
       }
 
-      const shouldWait =
-        n > 1 && !isLastBatch && !shouldSkipBatchWait && this.pauseBetweenBatchesMs;
-
+      const shouldWait = n > 1 && !isLastBatch && !shouldSkipBatchWait && this.pauseBetweenBatchesMs;
       if (shouldWait) {
         await wait(this.pauseBetweenBatchesMs);
       }
@@ -151,25 +131,29 @@ export class BufferFetcher {
       return this.fetcherFn(url);
     }
 
-    let response = new Response();
+    const agent = new https.Agent({
+      rejectUnauthorized: false // Ignore SSL certificate issues
+    });
+
+    let response: Response | undefined;
 
     const shouldUseRetry = this.retryCount > 0;
-
     if (shouldUseRetry) {
       let retries = 0;
       let isTrySuccess = false;
       let errorMsg = '';
+
       while (retries <= this.retryCount && !isTrySuccess) {
         const isLastRetry = retries === this.retryCount;
         let isCallSuccess = true;
         try {
-          response = await fetch(url);
+          response = await fetch(url, { agent });
         } catch (e) {
           isCallSuccess = false;
           errorMsg = e instanceof Error ? e.message : JSON.stringify(e);
         }
 
-        const isStatusOk = response.status === 200;
+        const isStatusOk = response?.status === 200;
         const contentLength = Number(response?.headers?.get('content-length') || 0);
         const isResponseWithData = contentLength > 0;
         isTrySuccess = isCallSuccess && isStatusOk;
@@ -183,13 +167,13 @@ export class BufferFetcher {
           await wait(this.pauseBetweenRetriesMs);
         }
         if (isLastRetry && !isTrySuccess && this.failAfterRetryCount) {
-          throw Error(errorMsg || 'Unknown error');
+          throw new Error(errorMsg || 'Unknown error');
         }
       }
     } else {
-      response = await fetch(url);
+      response = await fetch(url, { agent });
     }
 
-    return response.status === 200 ? response.buffer() : Buffer.from('', 'utf8');
+    return response?.status === 200 ? response.buffer() : Buffer.from('', 'utf8');
   }
 }
